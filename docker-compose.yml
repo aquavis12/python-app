@@ -7,6 +7,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      target: api          # selects the api stage from the combined Dockerfile
     container_name: python-task-api
     ports:
       - "5000:5000"
@@ -23,14 +24,14 @@ services:
   # ── Streamlit Frontend ────────────────────────────────────────────────────
   frontend:
     build:
-      context: ./frontend
+      context: .
       dockerfile: Dockerfile
+      target: frontend     # selects the frontend stage from the combined Dockerfile
     container_name: python-task-frontend
     ports:
       - "8501:8501"
     restart: unless-stopped
     environment:
-      # Points the frontend at the API service by Docker's internal DNS name
       - API_BASE_URL=http://api:5000
     depends_on:
       api:

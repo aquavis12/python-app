@@ -1,0 +1,131 @@
+// Jenkins pipeline that mirrors .github/workflows/deploy.yml:
+//   build single image -> push to ECR -> render task def -> deploy to ECS.
+//
+// Requirements on the Jenkins agent:
+//   - docker CLI, aws CLI v2, jq, and the gettext package (provides envsubst)
+//   - AWS auth: easiest is an IAM instance profile on the agent. If you instead
+//     store credentials in Jenkins, see the commented "withCredentials" block.
+
+pipeline {
+    agent any
+
+    environment {
+        AWS_REGION          = 'us-east-1'                 // <-- change to your region
+        ECR_REPOSITORY      = 'python-task-app'           // <-- your ECR repo name
+        ECS_CLUSTER         = 'python-task-cluster'       // <-- your ECS cluster name
+        ECS_SERVICE         = 'python-task-service'       // <-- your ECS service name
+        ECS_TASK_DEFINITION = 'deploy/ecs-task-definition.json'
+        CONTAINER_NAME      = 'python-task-app'           // must match containerDefinitions[].name
+
+        // ARN of ecsTaskExecutionRole, substituted into the task definition.
+        EXECUTION_ROLE_ARN  = credentials('ecs-execution-role-arn')
+
+        IMAGE_TAG           = "${env.GIT_COMMIT ?: env.BUILD_NUMBER}"
+    }
+
+    stages {
+        stage('Checkout') {
+            steps {
+                checkout scm
+            }
+        }
+
+        stage('Resolve ECR registry') {
+            steps {
+                script {
+                    env.AWS_ACCOUNT_ID = sh(
+                        script: "aws sts get-caller-identity --query Account --output text",
+                        returnStdout: true
+                    ).trim()
+                    env.ECR_REGISTRY = "${env.AWS_ACCOUNT_ID}.dkr.ecr.${env.AWS_REGION}.amazonaws.com"
+                    env.IMAGE_URI    = "${env.ECR_REGISTRY}/${env.ECR_REPOSITORY}:${env.IMAGE_TAG}"
+                    echo "Image: ${env.IMAGE_URI}"
+                }
+            }
+        }
+
+        stage('Login to ECR') {
+            steps {
+                sh '''
+                    aws ecr get-login-password --region "$AWS_REGION" \
+                      | docker login --username AWS --password-stdin "$ECR_REGISTRY"
+                '''
+            }
+        }
+
+        stage('Build & push image') {
+            steps {
+                sh '''
+                    docker build -t "$IMAGE_URI" -t "$ECR_REGISTRY/$ECR_REPOSITORY:latest" .
+                    docker push "$IMAGE_URI"
+                    docker push "$ECR_REGISTRY/$ECR_REPOSITORY:latest"
+                '''
+            }
+        }
+
+        stage('Render task definition') {
+            steps {
+                sh '''
+                    # 1) substitute ${AWS_REGION} and ${EXECUTION_ROLE_ARN}
+                    envsubst '${AWS_REGION} ${EXECUTION_ROLE_ARN}' \
+                      < "$ECS_TASK_DEFINITION" > task-def.rendered.json
+
+                    # 2) inject the freshly built image into the container definition
+                    jq --arg IMAGE "$IMAGE_URI" --arg NAME "$CONTAINER_NAME" \
+                      '.containerDefinitions |= map(if .name == $NAME then .image = $IMAGE else . end)' \
+                      task-def.rendered.json > task-def.final.json
+
+                    cat task-def.final.json
+                '''
+            }
+        }
+
+        stage('Deploy to ECS') {
+            steps {
+                sh '''
+                    # Register the new task definition revision.
+                    TASK_DEF_ARN=$(aws ecs register-task-definition \
+                      --cli-input-json file://task-def.final.json \
+                      --region "$AWS_REGION" \
+                      --query 'taskDefinition.taskDefinitionArn' --output text)
+                    echo "Registered: $TASK_DEF_ARN"
+
+                    # Point the service at the new revision and roll it out.
+                    aws ecs update-service \
+                      --cluster "$ECS_CLUSTER" \
+                      --service "$ECS_SERVICE" \
+                      --task-definition "$TASK_DEF_ARN" \
+                      --region "$AWS_REGION"
+
+                    # Wait until the deployment stabilizes.
+                    aws ecs wait services-stable \
+                      --cluster "$ECS_CLUSTER" \
+                      --services "$ECS_SERVICE" \
+                      --region "$AWS_REGION"
+                '''
+            }
+        }
+    }
+
+    post {
+        always {
+            sh 'docker logout "$ECR_REGISTRY" || true'
+            cleanWs()
+        }
+        success { echo "Deployed ${env.IMAGE_URI} to ${env.ECS_SERVICE}." }
+        failure { echo 'Pipeline failed. Check the stage logs above.' }
+    }
+}
+
+// ── Using Jenkins-stored AWS credentials instead of an instance role ─────────
+// If the agent has no IAM instance profile, wrap the AWS stages in:
+//
+//   withCredentials([usernamePassword(
+//       credentialsId: 'aws-deploy-creds',
+//       usernameVariable: 'AWS_ACCESS_KEY_ID',
+//       passwordVariable: 'AWS_SECRET_ACCESS_KEY')]) {
+//     // sh '...' aws commands here ...
+//   }
+//
+// Create 'aws-deploy-creds' (Username with password) and
+// 'ecs-execution-role-arn' (Secret text) under Manage Jenkins > Credentials.
