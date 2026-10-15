@@ -4,12 +4,41 @@ import os
 
 # ── Config ──────────────────────────────────────────────────────────────────
 API_BASE = os.getenv("API_BASE_URL", "http://localhost:5000")
+APP_VERSION = "v2"
 
 st.set_page_config(
     page_title="Task Manager",
     page_icon="✅",
     layout="centered",
 )
+
+# ── Custom CSS ───────────────────────────────────────────────────────────────
+st.markdown("""
+    <style>
+        .version-badge {
+            position: fixed;
+            bottom: 1rem;
+            right: 1rem;
+            background-color: #FF4B4B;
+            color: white;
+            padding: 4px 10px;
+            border-radius: 12px;
+            font-size: 12px;
+            font-weight: bold;
+            z-index: 9999;
+        }
+        .task-card {
+            border-radius: 8px;
+            padding: 0.5rem;
+        }
+        .header-row {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+    </style>
+    <div class="version-badge">""" + APP_VERSION + """</div>
+""", unsafe_allow_html=True)
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -46,14 +75,15 @@ def api_delete(path: str):
         return None, e.response.json().get("error", str(e))
 
 
-# ── Sidebar – API health ──────────────────────────────────────────────────────
+# ── Sidebar ──────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.title("⚙️ Settings")
     st.caption(f"API: `{API_BASE}`")
+    st.caption(f"Version: `{APP_VERSION}`")
 
     health_data, err = api_get("/health")
     if health_data:
-        st.success(f"API is **healthy** ✅")
+        st.success("API is **healthy** ✅")
         st.caption(f"Checked at: {health_data.get('timestamp', '')}")
     else:
         st.error(f"API unreachable ❌\n\n{err}")
@@ -61,10 +91,26 @@ with st.sidebar:
     if st.button("🔄 Refresh"):
         st.rerun()
 
+# ── Header ────────────────────────────────────────────────────────────────────
+col_title, col_badge = st.columns([5, 1])
+with col_title:
+    st.title("✅ Task Manager")
+with col_badge:
+    st.markdown(f"<br><span style='background:#FF4B4B;color:white;padding:3px 9px;border-radius:10px;font-size:13px;font-weight:bold'>{APP_VERSION}</span>", unsafe_allow_html=True)
 
-# ── Main ──────────────────────────────────────────────────────────────────────
-st.title("✅ Task Manager")
-st.write("A simple task tracker powered by Flask + Streamlit.")
+st.caption("A simple task tracker powered by Flask + Streamlit.")
+st.divider()
+
+# ── Stats row ─────────────────────────────────────────────────────────────────
+data, _ = api_get("/tasks")
+total = data["count"] if data else 0
+done  = sum(1 for t in data["tasks"] if t["done"]) if data else 0
+pending = total - done
+
+col1, col2, col3 = st.columns(3)
+col1.metric("Total Tasks", total)
+col2.metric("Completed", done)
+col3.metric("Pending", pending)
 
 st.divider()
 
@@ -72,17 +118,22 @@ st.divider()
 st.subheader("➕ Add a New Task")
 
 with st.form("create_task_form", clear_on_submit=True):
-    title = st.text_input("Title *", placeholder="e.g. Buy groceries")
+    title       = st.text_input("Title *", placeholder="e.g. Buy groceries")
     description = st.text_area("Description", placeholder="Optional details…", height=80)
-    submitted = st.form_submit_button("Create Task", use_container_width=True)
+    priority    = st.selectbox("Priority", ["🟢 Low", "🟡 Medium", "🔴 High"])
+    submitted   = st.form_submit_button("Create Task", use_container_width=True)
 
 if submitted:
     if not title.strip():
         st.warning("Title is required.")
     else:
-        result, err = api_post("/tasks", {"title": title.strip(), "description": description.strip()})
+        result, err = api_post("/tasks", {
+            "title": title.strip(),
+            "description": f"[{priority}] {description.strip()}" if description.strip() else f"[{priority}]",
+        })
         if result:
             st.success(f"Task **#{result['id']}** created: *{result['title']}*")
+            st.rerun()
         else:
             st.error(f"Failed to create task: {err}")
 
@@ -91,6 +142,7 @@ st.divider()
 # ── Task list ─────────────────────────────────────────────────────────────────
 st.subheader("📋 All Tasks")
 
+# Re-fetch after potential creation
 data, err = api_get("/tasks")
 
 if err:
@@ -99,7 +151,13 @@ elif data and data["count"] == 0:
     st.info("No tasks yet. Add one above!")
 else:
     tasks = data["tasks"]
-    st.caption(f"{data['count']} task(s) found")
+
+    # Search / filter
+    search = st.text_input("🔍 Search tasks", placeholder="Filter by title…")
+    if search:
+        tasks = [t for t in tasks if search.lower() in t["title"].lower()]
+
+    st.caption(f"Showing {len(tasks)} of {data['count']} task(s)")
 
     for task in tasks:
         with st.container(border=True):
