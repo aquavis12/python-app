@@ -2,26 +2,21 @@ name: Build and Deploy to ECS
 
 on:
   push:
-    branches: [main]
+    branches:
+      - main
   workflow_dispatch:
 
-# Required for OIDC authentication to AWS (no long-lived access keys).
 permissions:
   id-token: write
   contents: read
 
 env:
-  # Non-sensitive config lives in repository Variables (Settings > Secrets and
-  # variables > Actions > Variables). ECS_TASK_DEFINITION stays inline since it
-  # is a path in the repo, not environment-specific config.
-  AWS_REGION: ${{ vars.AWS_REGION }}
-  ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
+  AWS_REGION: ap-south-1
+  ECR_REPOSITORY: python-task-app
   ECS_CLUSTER: ${{ vars.ECS_CLUSTER }}
   ECS_SERVICE: ${{ vars.ECS_SERVICE }}
-  CONTAINER_NAME: ${{ vars.CONTAINER_NAME }}
-  # Family of the task definition you created in the ECS console. The workflow
-  # pulls the live definition, swaps in the new image, and registers a revision.
-  ECS_TASK_FAMILY: ${{ vars.ECS_TASK_FAMILY }}
+  CONTAINER_NAME: Main
+  ECS_TASK_FAMILY: python-task-app
 
 jobs:
   deploy:
@@ -32,18 +27,26 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # Authenticate to AWS using GitHub OIDC
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          # Create an IAM role trusted by GitHub's OIDC provider and paste its ARN
-          # into the AWS_DEPLOY_ROLE_ARN repository variable.
-          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          role-to-assume: arn:aws:iam::593845248500:role/github-deploy
           aws-region: ${{ env.AWS_REGION }}
+          role-session-name: GitHubActions
 
+      # Verify the assumed role
+      - name: Verify AWS Identity
+        run: |
+          echo "AWS Region: $AWS_REGION"
+          aws sts get-caller-identity
+
+      # Login to ECR
       - name: Login to Amazon ECR
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
+      # Build and push Docker image
       - name: Build, tag, and push image to Amazon ECR
         id: build-image
         env:
@@ -51,11 +54,19 @@ jobs:
           IMAGE_TAG: ${{ github.sha }}
         run: |
           IMAGE_URI="$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
-          docker build -t "$IMAGE_URI" -t "$ECR_REGISTRY/$ECR_REPOSITORY:latest" .
+
+          echo "Building image: $IMAGE_URI"
+
+          docker build \
+            -t "$IMAGE_URI" \
+            -t "$ECR_REGISTRY/$ECR_REPOSITORY:latest" .
+
           docker push "$IMAGE_URI"
           docker push "$ECR_REGISTRY/$ECR_REPOSITORY:latest"
+
           echo "image=$IMAGE_URI" >> "$GITHUB_OUTPUT"
 
+      # Download current ECS task definition
       - name: Download the live task definition from ECS
         run: |
           aws ecs describe-task-definition \
@@ -64,6 +75,9 @@ jobs:
             --query 'taskDefinition' \
             --output json > task-definition.json
 
+          echo "Task definition downloaded"
+
+      # Update container image
       - name: Fill in the new image ID in the ECS task definition
         id: task-def
         uses: aws-actions/amazon-ecs-render-task-definition@v1
@@ -72,6 +86,7 @@ jobs:
           container-name: ${{ env.CONTAINER_NAME }}
           image: ${{ steps.build-image.outputs.image }}
 
+      # Deploy to ECS
       - name: Deploy Amazon ECS task definition
         uses: aws-actions/amazon-ecs-deploy-task-definition@v2
         with:
