@@ -4,7 +4,7 @@ import os
 
 # ── Config ──────────────────────────────────────────────────────────────────
 API_BASE = os.getenv("API_BASE_URL", "http://localhost:5000")
-APP_VERSION = "v3"
+APP_VERSION = "v4"
 
 st.set_page_config(
     page_title="Task Manager",
@@ -56,6 +56,17 @@ def api_get(path: str):
 def api_post(path: str, payload: dict):
     try:
         r = requests.post(f"{API_BASE}{path}", json=payload, timeout=5)
+        r.raise_for_status()
+        return r.json(), None
+    except requests.exceptions.ConnectionError:
+        return None, "Cannot reach the API. Is it running?"
+    except requests.exceptions.HTTPError as e:
+        return None, e.response.json().get("error", str(e))
+
+
+def api_patch(path: str, payload: dict):
+    try:
+        r = requests.patch(f"{API_BASE}{path}", json=payload, timeout=5)
         r.raise_for_status()
         return r.json(), None
     except requests.exceptions.ConnectionError:
@@ -153,19 +164,43 @@ else:
     tasks = data["tasks"]
 
     # Search / filter
-    search = st.text_input("🔍 Search tasks", placeholder="Filter by title…")
+    col_search, col_status = st.columns([3, 2])
+    with col_search:
+        search = st.text_input("🔍 Search tasks", placeholder="Filter by title…")
+    with col_status:
+        status_filter = st.selectbox("Status", ["All", "Pending", "Completed"])
+
     if search:
         tasks = [t for t in tasks if search.lower() in t["title"].lower()]
+    if status_filter == "Pending":
+        tasks = [t for t in tasks if not t["done"]]
+    elif status_filter == "Completed":
+        tasks = [t for t in tasks if t["done"]]
 
     st.caption(f"Showing {len(tasks)} of {data['count']} task(s)")
 
     for task in tasks:
         with st.container(border=True):
-            col_info, col_btn = st.columns([5, 1])
+            col_check, col_info, col_btn = st.columns([1, 6, 1])
+
+            with col_check:
+                checked = st.checkbox(
+                    "Done",
+                    value=task["done"],
+                    key=f"done_{task['id']}",
+                    label_visibility="collapsed",
+                )
+                if checked != task["done"]:
+                    result, err = api_patch(f"/tasks/{task['id']}", {"done": checked})
+                    if result:
+                        st.rerun()
+                    else:
+                        st.error(err)
 
             with col_info:
                 status_icon = "✅" if task["done"] else "🔲"
-                st.markdown(f"**{status_icon} #{task['id']} — {task['title']}**")
+                title_md = f"~~#{task['id']} — {task['title']}~~" if task["done"] else f"#{task['id']} — {task['title']}"
+                st.markdown(f"**{status_icon} {title_md}**")
                 if task["description"]:
                     st.caption(task["description"])
                 st.caption(f"Created: {task['created_at']}")
