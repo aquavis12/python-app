@@ -20,7 +20,7 @@ pipeline {
 
     environment {
         AWS_REGION      = 'us-east-1'                // <-- change to your region
-        ECR_REPOSITORY  = 'python-task-app'          // <-- your ECR repo name
+        ECR_REPOSITORY  = 'python-app'          // <-- your ECR repo name
         ECS_CLUSTER     = 'python-task-cluster'      // <-- your ECS cluster name
         ECS_SERVICE     = 'python-task-service'      // <-- your ECS service name
         ECS_TASK_FAMILY = 'python-td'                // <-- ECS task definition family
