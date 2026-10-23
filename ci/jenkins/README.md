@@ -9,8 +9,9 @@ Pipeline definition: [`Jenkinsfile`](./Jenkinsfile) (Script Path
 `ci/jenkins/Jenkinsfile`).
 
 > The examples below use this repo's names — ECR repo `python-task-app`, cluster
-> `python-task-cluster`, service `python-task-service`, task family
-> `python-task-app`. Change them to match your own resources.
+> `python-task-cluster`, service `python-task-service`, task family `python-td`,
+> container name `Main`. Change them to match your own resources (the container
+> name **must** match `containerDefinitions[].name` in your task definition).
 
 ## 1. Architecture flow
 
@@ -192,10 +193,26 @@ You don't need AWS credentials in Jenkins; the instance role handles AWS access.
 ## 6. The Jenkinsfile
 
 [`Jenkinsfile`](./Jenkinsfile) defines the pipeline: checkout → resolve the ECR
-registry → login → build & push → register a new task definition revision →
-`aws ecs update-service` → `aws ecs wait services-stable`. The wait polls for up
-to ~10 minutes; if the ECS **deployment circuit breaker with rollback** is
-enabled, a bad image rolls back automatically and fails the build.
+registry → login → build & push → **prepare task definition** → deploy.
+
+The "Prepare task definition" stage does **not** read a template from the repo.
+It pulls the current task definition **live from ECS** by family
+(`aws ecs describe-task-definition --task-definition python-td`), swaps the image
+for the `Main` container with `jq`, and strips the read-only fields
+(`taskDefinitionArn`, `revision`, `status`, `requiresAttributes`,
+`compatibilities`, `registeredAt`, `registeredBy`, `deregisteredAt`) that
+`register-task-definition` rejects. The deploy stage then registers the new
+revision, runs `aws ecs update-service`, and `aws ecs wait services-stable`.
+
+Because the task definition comes from ECS, there's **no task-def JSON file to
+maintain in the repo** and no `envsubst` step — only `docker`, `aws` CLI v2, and
+`jq` are needed on the agent. The wait polls for up to ~10 minutes; if the ECS
+**deployment circuit breaker with rollback** is enabled, a bad image rolls back
+automatically and fails the build.
+
+> The task family `python-td` must already exist in ECS before the first run
+> (create it once when you set up the cluster/service). The pipeline reads and
+> revises it; it never creates the family from scratch.
 
 ## 7. Create the pipeline job
 
