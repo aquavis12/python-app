@@ -1,8 +1,17 @@
-// Jenkins pipeline that mirrors .github/workflows/deploy.yml:
-//   build single image -> push to ECR -> render task def -> deploy to ECS.
+// Jenkins pipeline: build single image -> push to ECR -> redeploy ECS service.
+//
+// The ECS task definition is managed OUTSIDE this pipeline (you created the
+// 'python-td' family in ECS). This pipeline does NOT render or register a task
+// definition. It resolves the newest ACTIVE revision of the family, points the
+// service at it, and forces a new deployment so ECS re-pulls the image.
+//
+// IMPORTANT: for the new build to actually run, the task definition's container
+// image must point at the ":latest" tag (which this pipeline overwrites on each
+// run). If your task def pins a specific SHA/digest, redeploying the same
+// revision will not pick up the new image.
 //
 // Requirements on the Jenkins agent:
-//   - docker CLI, aws CLI v2, jq, and the gettext package (provides envsubst)
+//   - docker CLI, aws CLI v2
 //   - AWS auth: easiest is an IAM instance profile on the agent. If you instead
 //     store credentials in Jenkins, see the commented "withCredentials" block.
 
@@ -10,17 +19,13 @@ pipeline {
     agent any
 
     environment {
-        AWS_REGION          = 'us-east-1'                 // <-- change to your region
-        ECR_REPOSITORY      = 'python-task-app'           // <-- your ECR repo name
-        ECS_CLUSTER         = 'python-task-cluster'       // <-- your ECS cluster name
-        ECS_SERVICE         = 'python-task-service'       // <-- your ECS service name
-        ECS_TASK_DEFINITION = 'deploy/ecs-task-definition.json'
-        CONTAINER_NAME      = 'python-task-app'           // must match containerDefinitions[].name
+        AWS_REGION      = 'us-east-1'                // <-- change to your region
+        ECR_REPOSITORY  = 'python-task-app'          // <-- your ECR repo name
+        ECS_CLUSTER     = 'python-task-cluster'      // <-- your ECS cluster name
+        ECS_SERVICE     = 'python-task-service'      // <-- your ECS service name
+        ECS_TASK_FAMILY = 'python-td'                // <-- ECS task definition family
 
-        // ARN of ecsTaskExecutionRole, substituted into the task definition.
-        EXECUTION_ROLE_ARN  = credentials('ecs-execution-role-arn')
-
-        IMAGE_TAG           = "${env.GIT_COMMIT ?: env.BUILD_NUMBER}"
+        IMAGE_TAG       = "${env.GIT_COMMIT ?: env.BUILD_NUMBER}"
     }
 
     stages {
@@ -63,45 +68,34 @@ pipeline {
             }
         }
 
-        stage('Render task definition') {
-            steps {
-                sh '''
-                    # 1) substitute ${AWS_REGION} and ${EXECUTION_ROLE_ARN}
-                    envsubst '${AWS_REGION} ${EXECUTION_ROLE_ARN}' \
-                      < "$ECS_TASK_DEFINITION" > task-def.rendered.json
-
-                    # 2) inject the freshly built image into the container definition
-                    jq --arg IMAGE "$IMAGE_URI" --arg NAME "$CONTAINER_NAME" \
-                      '.containerDefinitions |= map(if .name == $NAME then .image = $IMAGE else . end)' \
-                      task-def.rendered.json > task-def.final.json
-
-                    cat task-def.final.json
-                '''
-            }
-        }
-
         stage('Deploy to ECS') {
             steps {
                 sh '''
-                    # Register the new task definition revision.
-                    TASK_DEF_ARN=$(aws ecs register-task-definition \
-                      --cli-input-json file://task-def.final.json \
+                    set -e
+
+                    # Resolve the newest ACTIVE revision of the task family that
+                    # you manage in ECS (e.g. python-td:7). No register step.
+                    TASK_DEF_ARN=$(aws ecs describe-task-definition \
+                      --task-definition "$ECS_TASK_FAMILY" \
                       --region "$AWS_REGION" \
                       --query 'taskDefinition.taskDefinitionArn' --output text)
-                    echo "Registered: $TASK_DEF_ARN"
+                    echo "Using task definition: $TASK_DEF_ARN"
 
-                    # Point the service at the new revision and roll it out.
+                    # Point the service at that revision and force a new
+                    # deployment so ECS re-pulls the image.
                     aws ecs update-service \
                       --cluster "$ECS_CLUSTER" \
                       --service "$ECS_SERVICE" \
                       --task-definition "$TASK_DEF_ARN" \
-                      --region "$AWS_REGION"
+                      --force-new-deployment \
+                      --region "$AWS_REGION" > /dev/null
 
                     # Wait until the deployment stabilizes.
                     aws ecs wait services-stable \
                       --cluster "$ECS_CLUSTER" \
                       --services "$ECS_SERVICE" \
                       --region "$AWS_REGION"
+                    echo "Deployment stable"
                 '''
             }
         }
@@ -127,5 +121,5 @@ pipeline {
 //     // sh '...' aws commands here ...
 //   }
 //
-// Create 'aws-deploy-creds' (Username with password) and
-// 'ecs-execution-role-arn' (Secret text) under Manage Jenkins > Credentials.
+// Create 'aws-deploy-creds' (Username with password) under
+// Manage Jenkins > Credentials.
