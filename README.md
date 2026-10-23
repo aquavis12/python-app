@@ -1,4 +1,4 @@
-# Python Task Manager -V2
+# Python Task Manager
 
 A full-stack task manager: a **Flask REST API** backend + a **Streamlit** frontend, both Dockerized and wired together with Docker Compose.
 
